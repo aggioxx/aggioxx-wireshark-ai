@@ -2,11 +2,13 @@ import os
 import pyshark
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
+from langchain.chains import ConversationChain
+from langchain.memory import ConversationBufferMemory
 import tiktoken
 from app.adapter.log import log_info, log_error
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 openai_api_key = os.getenv('OPENAI_API_KEY')
 file_path = os.getenv('FILE_PATH')
@@ -31,6 +33,7 @@ class Packet:
         return (f"Packet {self.number}: Source IP {self.src_ip}:{self.src_port}, "
                 f"Destination IP {self.dst_ip}:{self.dst_port}, Protocol {self.protocol}, "
                 f"Length {self.length}, Timestamp {self.timestamp}, Flags {self.flags}")
+
 
 def process_packet(file_path):
     log_info(f"Processing file: {file_path}")
@@ -57,6 +60,7 @@ def process_packet(file_path):
     log_info(f"Processed {len(packets)} packets")
     return packets
 
+
 def get_packet_summaries(packets):
     log_info("Generating packet summaries")
     summaries = []
@@ -67,72 +71,81 @@ def get_packet_summaries(packets):
         if packet.flags:
             summary += f", Flags {packet.flags}"
         summaries.append(summary)
-    return "\n".join(summaries)
+    return summaries
 
-def chunk_summaries(packet_summaries, model=model):
+
+def count_tokens(text, model=model):
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
+
+
+def chunk_summaries_with_context(packet_summaries, model=model, max_context=max_tokens):
+    """
+    Chunk packet summaries to ensure no chunk exceeds the max context length, including past messages.
+    """
     chunks = []
     current_chunk = []
+    context_token_buffer = 1000  # Reserve tokens for system/user messages and responses
 
     for summary in packet_summaries:
         current_chunk.append(summary)
-        if count_tokens("\n".join(current_chunk), model=model) > max_tokens:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = []
+        # Check if current chunk + buffer exceeds max context
+        if count_tokens("\n".join(current_chunk), model=model) + context_token_buffer > max_context:
+            # Save the current chunk and reset
+            chunks.append("\n".join(current_chunk[:-1]))  # Exclude the last added summary
+            current_chunk = [summary]
 
     if current_chunk:
         chunks.append("\n".join(current_chunk))
 
     return chunks
 
-def count_tokens(text, model=model):
-    encoding = tiktoken.encoding_for_model(model)
-    return len(encoding.encode(text))
 
-def filter_relevant_packets(packets):
-    filtered = [
-        packet for packet in packets
-        if packet.protocol in ["TCP", "UDP"] and (
-                packet.src_ip.startswith("192.168") or packet.dst_ip.startswith("192.168"))
-    ]
-    return filtered
-
-def network_specialist_interface(file_path, question, model=model):
-    packets = process_packet(file_path)
-    packet_summaries = get_packet_summaries(packets).split("\n")
-
-    total_tokens = count_tokens("\n".join(packet_summaries), model=model)
-    print(f"Total Tokens: {total_tokens}")
-
-    if total_tokens > 4000:
-        print("Data exceeds token limit. Chunking summaries...")
-        chunks = chunk_summaries(packet_summaries, model=model)
-    else:
-        chunks = ["\n".join(packet_summaries)]
-
-    llm = ChatOpenAI(
+def network_specialist_chat():
+    # Initialize chat model and memory
+    chat_model = ChatOpenAI(
         temperature=0.0,
         model=model,
         openai_api_key=openai_api_key,
     )
+    memory = ConversationBufferMemory()
+    conversation = ConversationChain(
+        llm=chat_model,
+        memory=memory
+    )
 
-    final_response = ""
-    for i, chunk in enumerate(chunks):
-        print(f"Processing chunk {i + 1}/{len(chunks)}...")
-        enhanced_question = (f"Analyze the following network data and answer the question: {question}\n\n"
-                             f"Packet Summaries:\n{chunk}")
+    print("Chat is now live! Type your questions. Type 'exit' to quit.\n")
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() == 'exit':
+            print("Exiting chat. Goodbye!")
+            break
 
-        messages = [
-            SystemMessage(content="You are a network/cybersecurity expert analyzing network packet data."),
-            HumanMessage(content=enhanced_question)
-        ]
+        try:
+            # Process packets and create summaries
+            packets = process_packet(file_path)
+            packet_summaries = get_packet_summaries(packets)
 
-        response = llm(messages)
-        final_response += f"Chunk {i + 1} Response:\n{response.content}\n\n"
+            # Chunk packet summaries to ensure size stays within limits
+            chunks = chunk_summaries_with_context(packet_summaries)
 
-    return final_response
+            final_response = ""
+            for i, chunk in enumerate(chunks):
+                # Adjust the input with only the last few messages to manage token limits
+                memory_size = count_tokens(memory.load_memory_variables({})["history"], model=model)
+                if memory_size + count_tokens(chunk, model=model) > max_tokens:
+                    memory.clear()  # Clear memory if exceeding the context size
+
+                enhanced_input = (f"Analyze the following network packet data:\n\n{chunk}\n\n"
+                                  f"User Question: {user_input}")
+                response = conversation.predict(input=enhanced_input)
+                final_response += f"Chunk {i + 1} Response:\n{response}\n\n"
+
+            print(f"Bot: {final_response.strip()}\n")
+        except Exception as e:
+            log_error(f"Error during chat: {e}")
+            print("An error occurred during the chat. Check the logs for details.")
+
 
 if __name__ == "__main__":
-    print(os.listdir('./data'))
-    question = input("Type your question for the network specialist: ")
-    answer = network_specialist_interface(file_path, question)
-    print(f"Answer from LangChain:\n{answer}")
+    network_specialist_chat()

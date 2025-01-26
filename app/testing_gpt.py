@@ -1,13 +1,22 @@
 import os
 import pyshark
 from langchain_community.chat_models import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
 from langchain.schema import SystemMessage, HumanMessage
+import tiktoken
 from app.adapter.log import log_info, log_error
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+openai_api_key = os.getenv('OPENAI_API_KEY')
+file_path = os.getenv('FILE_PATH')
+model = os.getenv('MODEL')
+max_tokens = int(os.getenv('MAX_TOKENS'))
 
 
 class Packet:
-    def __init__(self, number, src_ip, dst_ip, protocol, src_port=None, dst_port=None, length=None, timestamp=None, flags=None):
+    def __init__(self, number, src_ip, dst_ip, protocol, src_port=None, dst_port=None, length=None, timestamp=None,
+                 flags=None):
         self.number = number
         self.src_ip = src_ip
         self.dst_ip = dst_ip
@@ -48,7 +57,6 @@ def process_packet(file_path):
     log_info(f"Processed {len(packets)} packets")
     return packets
 
-
 def get_packet_summaries(packets):
     log_info("Generating packet summaries")
     summaries = []
@@ -61,32 +69,70 @@ def get_packet_summaries(packets):
         summaries.append(summary)
     return "\n".join(summaries)
 
-def network_specialist_interface(file_path, question):
-    log_info("Starting network specialist interface")
-    packets = process_packet(file_path)
-    packet_summaries = get_packet_summaries(packets)
+def chunk_summaries(packet_summaries, model=model):
+    chunks = []
+    current_chunk = []
 
-    enhanced_question = (f"Analyze the following network data and answer the question: {question}\n\n"
-                         f"Packet Summaries:\n{packet_summaries}")
+    for summary in packet_summaries:
+        current_chunk.append(summary)
+        if count_tokens("\n".join(current_chunk), model=model) > max_tokens:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = []
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks
+
+def count_tokens(text, model=model):
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
+
+def filter_relevant_packets(packets):
+    filtered = [
+        packet for packet in packets
+        if packet.protocol in ["TCP", "UDP"] and (
+                packet.src_ip.startswith("192.168") or packet.dst_ip.startswith("192.168"))
+    ]
+    return filtered
+
+def network_specialist_interface(file_path, question, model=model):
+    packets = process_packet(file_path)
+    packet_summaries = get_packet_summaries(packets).split("\n")
+
+    total_tokens = count_tokens("\n".join(packet_summaries), model=model)
+    print(f"Total Tokens: {total_tokens}")
+
+    if total_tokens > 4000:
+        print("Data exceeds token limit. Chunking summaries...")
+        chunks = chunk_summaries(packet_summaries, model=model)
+    else:
+        chunks = ["\n".join(packet_summaries)]
 
     llm = ChatOpenAI(
         temperature=0.0,
-        model="gpt-3.5-turbo",
-        openai_api_key="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",
+        model=model,
+        openai_api_key=openai_api_key,
     )
 
-    messages = [
-        SystemMessage(content="You are a network/cybersecurity expert analyzing network packet data."),
-        HumanMessage(content=enhanced_question)
-    ]
+    final_response = ""
+    for i, chunk in enumerate(chunks):
+        print(f"Processing chunk {i + 1}/{len(chunks)}...")
+        enhanced_question = (f"Analyze the following network data and answer the question: {question}\n\n"
+                             f"Packet Summaries:\n{chunk}")
 
-    response = llm(messages)
-    log_info("Received response from LangChain")
-    return response.content
+        messages = [
+            SystemMessage(content="You are a network/cybersecurity expert analyzing network packet data."),
+            HumanMessage(content=enhanced_question)
+        ]
 
+        response = llm(messages)
+        final_response += f"Chunk {i + 1} Response:\n{response.content}\n\n"
+
+    return final_response
 
 if __name__ == "__main__":
-    file_path = '../data/redline.pcap'
+    print(os.listdir('./data'))
     question = input("Type your question for the network specialist: ")
     answer = network_specialist_interface(file_path, question)
     print(f"Answer from LangChain:\n{answer}")

@@ -34,17 +34,22 @@ class Packet:
                 f"Destination IP {self.dst_ip}:{self.dst_port}, Protocol {self.protocol}, "
                 f"Length {self.length}, Timestamp {self.timestamp}, Flags {self.flags}")
 
-
-def process_packet(file_path):
+def process_packet(file_path, src_ip_filter=None, dst_ip_filter=None, url_filter=None):
     log_info(f"Processing file: {file_path}")
-    capture = pyshark.FileCapture(file_path, display_filter="ip or tcp or udp")
+    capture = pyshark.FileCapture(file_path, display_filter="ip or tcp or udp or http")
     packets = []
     for packet in capture:
         try:
             if 'IP' in packet:
-                number = packet.number
                 src_ip = packet.ip.src
                 dst_ip = packet.ip.dst
+                if (src_ip_filter and src_ip != src_ip_filter) or (dst_ip_filter and dst_ip != dst_ip_filter):
+                    continue
+
+                if url_filter and 'HTTP' in packet and url_filter not in packet.http.host:
+                    continue
+
+                number = packet.number
                 protocol = packet.highest_layer
                 src_port = packet[packet.transport_layer].srcport if hasattr(packet, 'transport_layer') else None
                 dst_port = packet[packet.transport_layer].dstport if hasattr(packet, 'transport_layer') else None
@@ -59,7 +64,6 @@ def process_packet(file_path):
     capture.close()
     log_info(f"Processed {len(packets)} packets")
     return packets
-
 
 def get_packet_summaries(packets):
     log_info("Generating packet summaries")
@@ -115,6 +119,10 @@ def network_specialist_chat():
     )
 
     print("Chat is now live! Type your questions. Type 'exit' to quit.\n")
+    src_ip_filter = input("Enter source IP filter (or press Enter to skip): ")
+    dst_ip_filter = input("Enter destination IP filter (or press Enter to skip): ")
+    url_filter = input("Enter URL filter (or press Enter to skip): ")
+
     while True:
         user_input = input("You: ")
         if user_input.lower() == 'exit':
@@ -123,11 +131,14 @@ def network_specialist_chat():
 
         try:
             # Process packets and create summaries
-            packets = process_packet(file_path)
+            packets = process_packet(file_path, src_ip_filter or None, dst_ip_filter or None, url_filter or None)
             packet_summaries = get_packet_summaries(packets)
 
             # Chunk packet summaries to ensure size stays within limits
-            chunks = chunk_summaries_with_context(packet_summaries)
+            if count_tokens("\n".join(packet_summaries), model=model) > max_tokens:
+                chunks = chunk_summaries_with_context(packet_summaries)
+            else:
+                chunks = ["\n".join(packet_summaries)]
 
             final_response = ""
             for i, chunk in enumerate(chunks):
@@ -145,7 +156,6 @@ def network_specialist_chat():
         except Exception as e:
             log_error(f"Error during chat: {e}")
             print("An error occurred during the chat. Check the logs for details.")
-
 
 if __name__ == "__main__":
     network_specialist_chat()

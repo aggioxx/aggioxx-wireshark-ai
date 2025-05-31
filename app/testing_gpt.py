@@ -8,7 +8,6 @@ import tiktoken
 from app.adapter.log import log_info, log_error
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 openai_api_key = os.getenv('OPENAI_API_KEY')
 file_path = os.getenv('FILE_PATH')
@@ -85,14 +84,12 @@ def chunk_summaries_with_context(packet_summaries, model=model, max_context=max_
     """
     chunks = []
     current_chunk = []
-    context_token_buffer = 1000  # Reserve tokens for system/user messages and responses
+    context_token_buffer = 1000
 
     for summary in packet_summaries:
         current_chunk.append(summary)
-        # Check if current chunk + buffer exceeds max context
         if count_tokens("\n".join(current_chunk), model=model) + context_token_buffer > max_context:
-            # Save the current chunk and reset
-            chunks.append("\n".join(current_chunk[:-1]))  # Exclude the last added summary
+            chunks.append("\n".join(current_chunk[:-1]))
             current_chunk = [summary]
 
     if current_chunk:
@@ -102,7 +99,6 @@ def chunk_summaries_with_context(packet_summaries, model=model, max_context=max_
 
 
 def network_specialist_chat():
-    # Initialize chat model and memory
     chat_model = ChatOpenAI(
         temperature=0.0,
         model=model,
@@ -122,19 +118,16 @@ def network_specialist_chat():
             break
 
         try:
-            # Process packets and create summaries
             packets = process_packet(file_path)
             packet_summaries = get_packet_summaries(packets)
 
-            # Chunk packet summaries to ensure size stays within limits
             chunks = chunk_summaries_with_context(packet_summaries)
 
             final_response = ""
             for i, chunk in enumerate(chunks):
-                # Adjust the input with only the last few messages to manage token limits
                 memory_size = count_tokens(memory.load_memory_variables({})["history"], model=model)
                 if memory_size + count_tokens(chunk, model=model) > max_tokens:
-                    memory.clear()  # Clear memory if exceeding the context size
+                    memory.clear()
 
                 enhanced_input = (f"Analyze the following network packet data:\n\n{chunk}\n\n"
                                   f"User Question: {user_input}")
